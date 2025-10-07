@@ -1,15 +1,26 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Net;
+using System.Windows.Forms;
+using Newtonsoft.Json;
+using CampusCompass.Properties;
 
 /// <summary>
 /// Представляет карту здания, содержащую узлы (комнаты, лестницы и т.д.) и связи между ними.
 /// </summary>
+[Serializable]
 public class BuildingMap
 {
     /// <summary>
     /// Список всех узлов на карте.
     /// </summary>
     public List<Node> Nodes { get; set; }
+
+    // Словарь для фоновых изображений по ключу "building_floor" (например, "1_1" для building 1, floor 1)
+    public Dictionary<string, string> BackgroundImages { get; set; } = new Dictionary<string, string>();
 
     /// <summary>
     /// Инициализирует новый экземпляр класса <see cref="BuildingMap"/> с пустым списком узлов.
@@ -87,5 +98,48 @@ public class BuildingMap
                 to.Connections.Remove(from);
             }
         }
+    }
+
+    /// <summary>
+    /// Добавляет фоновое изображение для указанного корпуса и этажа.
+    /// </summary>
+    /// <param name="building">Номер корпуса.</param>
+    /// <param name="floor">Номер этажа.</param>
+    /// <param name="filePath">Путь к файлу изображения или имя ресурса.</param>
+    public void AddBackgroundImage(int building, int floor, string filePath)
+    {
+        string key = $"{building}_{floor}";
+        BackgroundImages[key] = filePath;
+    }
+
+    /// <summary>
+    /// Обновляет фоновое изображение для указанного корпуса и этажа.
+    /// </summary>
+    /// <param name="building">Номер корпуса.</param>
+    /// <param name="floor">Номер этажа.</param>
+    /// <param name="filePath">Путь к файлу изображения или имя ресурса.</param>
+    public void UpdateBackgroundImage(int building, int floor, string filePath)
+    {
+        string key = $"{building}_{floor}";
+        BackgroundImages[key] = filePath;
+    }
+
+    /// <summary>
+    /// Получает фоновое изображение для указанного корпуса и этажа.
+    /// </summary>
+    /// <param name="building">Номер корпуса.</param>
+    /// <param name="floor">Номер этажа.</param>
+    /// <returns>Объект Bitmap, если изображение найдено, иначе null.</returns>
+    public Bitmap GetBackgroundImage(int building, int floor)
+    {
+        string key = $"{building}_{floor}";
+        if (BackgroundImages.TryGetValue(key, out string filePath))
+        {
+            if (File.Exists(filePath))
+            {
+                return new Bitmap(filePath);
+            }
+        }
+        return null;
     }
 }

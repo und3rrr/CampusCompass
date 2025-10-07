@@ -36,6 +36,13 @@ public class NavigationForm : Form
     private Label floorLabel;
     private Label buildingLabel;
 
+    // Новое: Смещение для вида карты
+    private int offsetX = 0;
+    private int offsetY = 0;
+
+    // Флаг для показа графа
+    private bool showGraph = false;
+
     /// <summary>
     /// Инициализирует новый экземпляр класса <see cref="NavigationForm"/>.
     /// </summary>
@@ -48,6 +55,7 @@ public class NavigationForm : Form
             LoadInitialMap();
             BeginInvoke(new Action(() =>
             {
+                AdjustView(); // Новое: Автоматическая настройка вида при загрузке
                 Refresh();
                 Console.WriteLine("NavigationForm: Форма перерисована");
             }));
@@ -181,7 +189,7 @@ public class NavigationForm : Form
     /// <param name="e">Аргументы события.</param>
     private void MapPictureBox_MouseDown(object sender, MouseEventArgs e)
     {
-        if (e.Button == MouseButtons.Left)
+        if (e.Button == MouseButtons.Right)
         {
             isDraggingMap = true;
             lastMousePosition = e.Location;
@@ -197,16 +205,10 @@ public class NavigationForm : Form
     {
         if (isDraggingMap)
         {
-            int deltaX = (int)((e.X - lastMousePosition.X) / zoomLevel);
-            int deltaY = (int)((e.Y - lastMousePosition.Y) / zoomLevel);
-
-            // Смещаем все узлы карты
-            foreach (var node in map.Nodes)
-            {
-                node.X += deltaX;
-                node.Y += deltaY;
-            }
-
+            int deltaX = e.X - lastMousePosition.X;
+            int deltaY = e.Y - lastMousePosition.Y;
+            offsetX += deltaX;
+            offsetY += deltaY;
             lastMousePosition = e.Location;
             mapPictureBox.Invalidate();
         }
@@ -219,7 +221,7 @@ public class NavigationForm : Form
     /// <param name="e">Аргументы события.</param>
     private void MapPictureBox_MouseUp(object sender, MouseEventArgs e)
     {
-        if (e.Button == MouseButtons.Left)
+        if (e.Button == MouseButtons.Right)
         {
             isDraggingMap = false;
         }
@@ -232,12 +234,20 @@ public class NavigationForm : Form
     /// <param name="e">Аргументы события.</param>
     private void MapPictureBox_MouseWheel(object sender, MouseEventArgs e)
     {
+        double oldZoom = zoomLevel;
         if (e.Delta > 0)
             zoomLevel *= 1.1;
         else
             zoomLevel /= 1.1;
 
         zoomLevel = Math.Max(0.5, Math.Min(zoomLevel, 3.0));
+
+        // Зум вокруг курсора
+        int mouseX = e.X;
+        int mouseY = e.Y;
+        offsetX = (int)(mouseX - (mouseX - offsetX) * (zoomLevel / oldZoom));
+        offsetY = (int)(mouseY - (mouseY - offsetY) * (zoomLevel / oldZoom));
+
         mapPictureBox.Invalidate();
     }
 
@@ -258,8 +268,9 @@ public class NavigationForm : Form
     /// <param name="e">Аргументы события.</param>
     private void DrawMap(object sender, PaintEventArgs e)
     {
-        if (mapBitmap.Width != mapPictureBox.Width || mapBitmap.Height != mapPictureBox.Height)
+        if (mapBitmap == null || mapBitmap.Width != mapPictureBox.Width || mapBitmap.Height != mapPictureBox.Height)
         {
+            mapBitmap?.Dispose();
             mapBitmap = new Bitmap(mapPictureBox.Width, mapPictureBox.Height);
         }
 
@@ -269,19 +280,31 @@ public class NavigationForm : Form
             int currentFloor = (int)floorFilter.Value;
             int currentBuilding = (int)buildingFilter.Value;
 
-            var visibleNodes = map.Nodes.Where(n => n.Floor == currentFloor && n.Building == currentBuilding);
+            Bitmap bgImage = map.GetBackgroundImage(currentBuilding, currentFloor);
+            if (bgImage != null)
+            {
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                int scaledWidth = (int)(bgImage.Width * zoomLevel);
+                int scaledHeight = (int)(bgImage.Height * zoomLevel);
+                // Исправление зеркалирования: убедимся, что смещение корректно
+                g.DrawImage(bgImage, new Rectangle(offsetX, offsetY, scaledWidth, scaledHeight));
+            }
+
+            var visibleNodes = map.Nodes.Where(n => n.Floor == currentFloor && n.Building == currentBuilding).ToList();
 
             foreach (var node in visibleNodes)
             {
                 foreach (var conn in node.Connections)
                 {
-                    if (conn.Key.Floor == currentFloor && conn.Key.Building == currentBuilding)
+                    if (visibleNodes.Contains(conn.Key))
                     {
                         using (var pen = new Pen(Color.Black, 2))
                         {
                             g.DrawLine(pen,
-                                (float)(node.X * zoomLevel), (float)(node.Y * zoomLevel),
-                                (float)(conn.Key.X * zoomLevel), (float)(conn.Key.Y * zoomLevel));
+                                (float)((node.X * zoomLevel) + offsetX),
+                                (float)((node.Y * zoomLevel) + offsetY),
+                                (float)((conn.Key.X * zoomLevel) + offsetX),
+                                (float)((conn.Key.Y * zoomLevel) + offsetY));
                         }
                     }
                 }
@@ -290,47 +313,53 @@ public class NavigationForm : Form
             foreach (var node in visibleNodes)
             {
                 Brush brush = node.IsSelected ? Brushes.Red :
-                            node.Type == NodeType.Staircase ? Brushes.Green :
-                            node.Type == NodeType.BuildingTransition ? Brushes.Purple :
-                            Brushes.Blue;
+                              node.Type == NodeType.Staircase ? Brushes.Green :
+                              node.Type == NodeType.BuildingTransition ? Brushes.Purple :
+                              Brushes.Blue;
                 float nodeSize = (float)(20 * zoomLevel);
-                if (node.Type == NodeType.Staircase)
-                    g.FillRectangle(brush, (float)(node.X * zoomLevel - nodeSize / 2),
-                        (float)(node.Y * zoomLevel - nodeSize / 2), nodeSize, nodeSize);
-                else
-                    g.FillEllipse(brush, (float)(node.X * zoomLevel - nodeSize / 2),
-                        (float)(node.Y * zoomLevel - nodeSize / 2), nodeSize, nodeSize);
+                float drawX = (float)((node.X * zoomLevel) + offsetX - nodeSize / 2);
+                float drawY = (float)((node.Y * zoomLevel) + offsetY - nodeSize / 2);
+                g.FillEllipse(brush, drawX, drawY, nodeSize, nodeSize);
                 g.DrawString(node.Name, new Font("Arial", (float)(10 * zoomLevel)), Brushes.Black,
-                    (float)(node.X * zoomLevel + nodeSize / 2), (float)(node.Y * zoomLevel));
-            }
-
-            if (currentPath != null && currentStep < currentPath.Count)
-            {
-                for (int i = 0; i < currentStep && i < currentPath.Count - 1; i++)
-                {
-                    if (currentPath[i].Floor == currentFloor && currentPath[i].Building == currentBuilding &&
-                        currentPath[i + 1].Floor == currentFloor && currentPath[i + 1].Building == currentBuilding)
-                    {
-                        using (var pen = new Pen(Color.Red, 4))
-                        {
-                            g.DrawLine(pen,
-                                (float)(currentPath[i].X * zoomLevel), (float)(currentPath[i].X * zoomLevel),
-                                (float)(currentPath[i + 1].X * zoomLevel), (float)(currentPath[i + 1].Y * zoomLevel));
-                        }
-                        g.DrawString((i + 1).ToString(), new Font("Arial", (float)(12 * zoomLevel), FontStyle.Bold),
-                            Brushes.White, (float)(currentPath[i].X * zoomLevel - 5), (float)(currentPath[i].Y * zoomLevel - 5));
-                    }
-                }
+                    (float)((node.X * zoomLevel) + offsetX + nodeSize / 2), (float)((node.Y * zoomLevel) + offsetY));
             }
         }
         mapPictureBox.Image = mapBitmap;
     }
 
-    /// <summary>
-    /// Вычисляет маршрут между выбранными узлами.
-    /// </summary>
-    /// <param name="sender">Источник события.</param>
-    /// <param name="e">Аргументы события.</param>
+    private void AdjustView()
+    {
+        zoomLevel = 1.0;
+
+        if (map.Nodes.Count == 0) return;
+
+        int currentFloor = (int)floorFilter.Value;
+        int currentBuilding = (int)buildingFilter.Value;
+        var visibleNodes = map.Nodes.Where(n => n.Floor == currentFloor && n.Building == currentBuilding).ToList();
+
+        if (visibleNodes.Count == 0) return;
+
+        int minX = visibleNodes.Min(n => n.X);
+        int minY = visibleNodes.Min(n => n.Y);
+        int maxX = visibleNodes.Max(n => n.X);
+        int maxY = visibleNodes.Max(n => n.Y);
+
+        double widthRatio = (double)mapPictureBox.Width / (maxX - minX + 100);
+        double heightRatio = (double)mapPictureBox.Height / (maxY - minY + 100);
+        zoomLevel = Math.Min(widthRatio, heightRatio);
+        zoomLevel = Math.Max(0.5, Math.Min(zoomLevel, 1.0));
+
+        int centerX = (minX + maxX) / 2;
+        int centerY = (minY + maxY) / 2;
+        int targetCenterX = mapPictureBox.Width / 2;
+        int targetCenterY = mapPictureBox.Height / 2;
+
+        offsetX = targetCenterX - (int)(centerX * zoomLevel);
+        offsetY = targetCenterY - (int)(centerY * zoomLevel);
+
+        mapPictureBox.Invalidate();
+    }
+
     private void CalculatePath(object sender, EventArgs e)
     {
         if (startComboBox.SelectedItem != null && endComboBox.SelectedItem != null)
@@ -344,17 +373,13 @@ public class NavigationForm : Form
             nextStepButton.Visible = false;
             endNavigationButton.Visible = false;
             startNavigationButton.Visible = true;
+            showGraph = false;
             mapPictureBox.Invalidate();
             Refresh();
             Application.DoEvents();
         }
     }
 
-    /// <summary>
-    /// Начинает навигацию по маршруту.
-    /// </summary>
-    /// <param name="sender">Источник события.</param>
-    /// <param name="e">Аргументы события.</param>
     private void StartNavigation(object sender, EventArgs e)
     {
         if (currentPath != null && currentPath.Count > 0)
@@ -375,11 +400,6 @@ public class NavigationForm : Form
         }
     }
 
-    /// <summary>
-    /// Завершает текущий маршрут.
-    /// </summary>
-    /// <param name="sender">Источник события.</param>
-    /// <param name="e">Аргументы события.</param>
     private void EndNavigation(object sender, EventArgs e)
     {
         currentPath = null;
@@ -389,18 +409,15 @@ public class NavigationForm : Form
         nextStepButton.Visible = false;
         endNavigationButton.Visible = false;
         startNavigationButton.Visible = true;
+        showGraph = false;
         mapPictureBox.Invalidate();
         Refresh();
         Application.DoEvents();
     }
 
-    /// <summary>
-    /// Показывает следующий шаг маршрута.
-    /// </summary>
-    /// <param name="sender">Источник события.</param>
-    /// <param name="e">Аргументы события.</param>
     private void ShowNextStep(object sender, EventArgs e)
     {
+        showGraph = true;
         if (currentPath != null && currentStep < currentPath.Count - 1)
         {
             var current = currentPath[currentStep];
@@ -424,35 +441,21 @@ public class NavigationForm : Form
             nextStepButton.Visible = false;
             endNavigationButton.Visible = false;
             startNavigationButton.Visible = true;
+            showGraph = false;
+            mapPictureBox.Invalidate();
             Refresh();
             Application.DoEvents();
         }
     }
 
-    /// <summary>
-    /// Центрирует карту на указанном узле.
-    /// </summary>
-    /// <param name="node">Узел, на котором нужно центрировать карту.</param>
     private void CenterMapOnNode(Node node)
     {
         int centerX = mapPictureBox.Width / 2;
         int centerY = mapPictureBox.Height / 2;
-        int offsetX = centerX - (int)(node.X * zoomLevel);
-        int offsetY = centerY - (int)(node.Y * zoomLevel);
-
-        foreach (var n in map.Nodes)
-        {
-            n.X = (int)((n.X * zoomLevel + offsetX) / zoomLevel);
-            n.Y = (int)((n.Y * zoomLevel + offsetY) / zoomLevel);
-        }
+        offsetX = centerX - (int)(node.X * zoomLevel);
+        offsetY = centerY - (int)(node.Y * zoomLevel);
     }
 
-    /// <summary>
-    /// Генерирует текстовую инструкцию для перехода между двумя узлами.
-    /// </summary>
-    /// <param name="from">Текущий узел.</param>
-    /// <param name="to">Следующий узел.</param>
-    /// <returns>Текстовая инструкция для пользователя.</returns>
     private string GetInstruction(Node from, Node to)
     {
         if (from.Floor != to.Floor)
@@ -471,11 +474,6 @@ public class NavigationForm : Form
         return dy > 0 ? "Идите вниз" : "Идите вверх";
     }
 
-    /// <summary>
-    /// Открывает форму редактора карты.
-    /// </summary>
-    /// <param name="sender">Источник события.</param>
-    /// <param name="e">Аргументы события.</param>
     private void OpenEditor(object sender, EventArgs e)
     {
         Console.WriteLine("NavigationForm: Открытие режима редактора");
@@ -490,11 +488,6 @@ public class NavigationForm : Form
         Console.WriteLine("NavigationForm: Режим редактора закрыт");
     }
 
-    /// <summary>
-    /// Сохраняет карту в файл в формате JSON.
-    /// </summary>
-    /// <param name="sender">Источник события.</param>
-    /// <param name="e">Аргументы события.</param>
     private void SaveMap(object sender, EventArgs e)
     {
         using (var sfd = new SaveFileDialog { Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*" })
@@ -503,14 +496,12 @@ public class NavigationForm : Form
             {
                 try
                 {
-                    // Сериализуем объект map в JSON
                     string json = JsonConvert.SerializeObject(map, new JsonSerializerSettings
                     {
-                        ReferenceLoopHandling = ReferenceLoopHandling.Ignore, // Игнорируем циклические ссылки
-                        Formatting = Formatting.Indented // Для читаемого формата
+                        ReferenceLoopHandling = ReferenceLoopHandling.Ignore,
+                        Formatting = Formatting.Indented
                     });
 
-                    // Записываем JSON в файл
                     File.WriteAllText(sfd.FileName, json);
                     MessageBox.Show("Карта успешно сохранена!", "Успех", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
@@ -532,11 +523,6 @@ public class NavigationForm : Form
         }
     }
 
-    /// <summary>
-    /// Загружает карту из файла в формате JSON.
-    /// </summary>
-    /// <param name="sender">Источник события.</param>
-    /// <param name="e">Аргументы события.</param>
     private void LoadMap(object sender, EventArgs e)
     {
         using (var ofd = new OpenFileDialog { Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*" })
@@ -545,13 +531,11 @@ public class NavigationForm : Form
             {
                 try
                 {
-                    // Читаем JSON из файла
                     string json = File.ReadAllText(ofd.FileName);
 
-                    // Десериализуем JSON в объект BuildingMap
                     map = JsonConvert.DeserializeObject<BuildingMap>(json, new JsonSerializerSettings
                     {
-                        ReferenceLoopHandling = ReferenceLoopHandling.Ignore // Игнорируем циклические ссылки
+                        ReferenceLoopHandling = ReferenceLoopHandling.Ignore
                     });
 
                     UpdateComboBoxes();
@@ -566,9 +550,6 @@ public class NavigationForm : Form
         }
     }
 
-    /// <summary>
-    /// Обновляет списки начальных и конечных узлов в выпадающих меню.
-    /// </summary>
     private void UpdateComboBoxes()
     {
         startComboBox.Items.Clear();
@@ -580,9 +561,6 @@ public class NavigationForm : Form
         }
     }
 
-    /// <summary>
-    /// Загружает начальную карту с узлами и связями.
-    /// </summary>
     private void LoadInitialMap()
     {
         Console.WriteLine("NavigationForm: LoadInitialMap вызван");
@@ -740,9 +718,6 @@ public class NavigationForm : Form
         Console.WriteLine($"NavigationForm: Карта загружена, узлов: {map.Nodes.Count}");
     }
 
-    /// <summary>
-    /// Корректирует позиции узлов на карте для лучшего отображения.
-    /// </summary>
     private void AdjustNodePositions()
     {
         foreach (var node in map.Nodes)

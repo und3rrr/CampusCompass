@@ -1,5 +1,8 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
 using System.Linq;
 using System.Windows.Forms;
 
@@ -20,6 +23,10 @@ public class EditorForm : Form
     private TextBox nameBox;
     private ComboBox typeBox;
 
+    private bool isAddingCorridor = false; // Флаг для режима добавления коридора
+    private List<Node> corridorNodes = new List<Node>(); // Временный список для точек коридора
+    private Node lastCorridorNode; // Последняя добавленная точка в коридоре
+
     // Переменные для передвижения карты
     private bool isDraggingMap = false;
     private Point lastMousePosition;
@@ -28,6 +35,12 @@ public class EditorForm : Form
     private Label floorLabel;
     private Label buildingLabel;
     private Label typeLabel;
+
+    private Button finishCorridorButton; // Кнопка завершения коридора как поле класса
+
+    // Смещение для вида карты
+    private int offsetX = 0;
+    private int offsetY = 0;
 
     /// <summary>
     /// Инициализирует новый экземпляр класса <see cref="EditorForm"/>.
@@ -44,6 +57,7 @@ public class EditorForm : Form
             InitializeComponents();
             BeginInvoke(new Action(() =>
             {
+                AdjustView(); // Автоматическая настройка вида при загрузке
                 Refresh();
                 Console.WriteLine("EditorForm: Форма перерисована");
             }));
@@ -64,7 +78,6 @@ public class EditorForm : Form
         mapPictureBox = new PictureBox
         {
             Dock = DockStyle.Fill,
-            Image = mapBitmap,
             Visible = true
         };
         Controls.Add(mapPictureBox);
@@ -110,10 +123,26 @@ public class EditorForm : Form
             {
                 selectedNode.Name = nameInputBox.Text;
                 nameInputBox.Visible = false;
-                UpdateControls();
                 mapPictureBox.Invalidate();
             }
         };
+
+        // Кнопка для выбора фона
+        var selectBgButton = new Button { Text = "Выбрать фон", Top = 270, Left = 10, Width = 180 };
+        selectBgButton.Click += SelectBackground;
+
+        // Кнопка для начала добавления коридора
+        var addCorridorButton = new Button { Text = "Добавить коридор", Top = 300, Left = 10, Width = 180 };
+        addCorridorButton.Click += StartAddCorridor;
+
+        // Кнопка для завершения коридора
+        finishCorridorButton = new Button { Text = "Завершить коридор", Top = 330, Left = 10, Width = 180 };
+        finishCorridorButton.Click += FinishCorridor;
+        finishCorridorButton.Enabled = false;
+
+        panel.Controls.Add(selectBgButton);
+        panel.Controls.Add(addCorridorButton);
+        panel.Controls.Add(finishCorridorButton);
 
         // Привязка событий
         mapPictureBox.MouseClick += MapClick;
@@ -124,8 +153,8 @@ public class EditorForm : Form
         mapPictureBox.Paint += DrawMap;
         addConnButton.Click += StartConnection;
         removeButton.Click += RemoveNode;
-        floorFilter.ValueChanged += (s, e) => mapPictureBox.Invalidate();
-        buildingFilter.ValueChanged += (s, e) => mapPictureBox.Invalidate();
+        floorFilter.ValueChanged += (s, e) => { mapPictureBox.Invalidate(); AdjustView(); };
+        buildingFilter.ValueChanged += (s, e) => { mapPictureBox.Invalidate(); AdjustView(); };
         nameBox.TextChanged += (s, e) => { if (selectedNode != null) { selectedNode.Name = nameBox.Text; mapPictureBox.Invalidate(); } };
         floorFilter.ValueChanged += (s, e) => { if (selectedNode != null) { selectedNode.Floor = (int)floorFilter.Value; mapPictureBox.Invalidate(); } };
         buildingFilter.ValueChanged += (s, e) => { if (selectedNode != null) { selectedNode.Building = (int)buildingFilter.Value; mapPictureBox.Invalidate(); } };
@@ -142,23 +171,227 @@ public class EditorForm : Form
         };
     }
 
-    /// <summary>
-    /// Обрабатывает событие нажатия кнопки мыши на карте для начала перемещения карты или узла.
-    /// </summary>
-    /// <param name="sender">Источник события.</param>
-    /// <param name="e">Аргументы события.</param>
+    private void SelectBackground(object sender, EventArgs e)
+    {
+        using (var ofd = new OpenFileDialog { Filter = "Изображения (*.jpg;*.png;*.gif)|*.jpg;*.png;*.gif|Все файлы (*.*)|*.*" })
+        {
+            if (ofd.ShowDialog() == DialogResult.OK)
+            {
+                string filePath = ofd.FileName;
+                int currentBuilding = (int)buildingFilter.Value;
+                int currentFloor = (int)floorFilter.Value;
+
+                string appImagesFolder = Path.Combine(Application.StartupPath, "Images");
+                if (!Directory.Exists(appImagesFolder))
+                {
+                    Directory.CreateDirectory(appImagesFolder);
+                }
+                string newFilePath = Path.Combine(appImagesFolder, Path.GetFileName(filePath));
+                File.Copy(filePath, newFilePath, true);
+
+                map.UpdateBackgroundImage(currentBuilding, currentFloor, newFilePath);
+                mapPictureBox.Invalidate();
+            }
+        }
+    }
+
+    private void StartAddCorridor(object sender, EventArgs e)
+    {
+        isAddingCorridor = true;
+        corridorNodes.Clear();
+        lastCorridorNode = null;
+        MessageBox.Show("Кликните для добавления точек коридора. Для завершения нажмите 'Завершить коридор'.");
+        finishCorridorButton.Enabled = true;
+    }
+
+    private void FinishCorridor(object sender, EventArgs e)
+    {
+        isAddingCorridor = false;
+        if (corridorNodes.Count > 1)
+        {
+            for (int i = 0; i < corridorNodes.Count - 1; i++)
+            {
+                int distance = CalculateDistance(corridorNodes[i], corridorNodes[i + 1]);
+                map.AddConnection(corridorNodes[i], corridorNodes[i + 1], distance);
+            }
+        }
+        corridorNodes.Clear();
+        lastCorridorNode = null;
+        finishCorridorButton.Enabled = false;
+        mapPictureBox.Invalidate();
+    }
+
+    private void MapClick(object sender, MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Left)
+        {
+            if (isAddingCorridor)
+            {
+                int x = (int)((e.X - offsetX) / zoomLevel);
+                int y = (int)((e.Y - offsetY) / zoomLevel);
+                var newNode = new Node($"Corridor_{corridorNodes.Count + 1}", x, y, (int)floorFilter.Value, (int)buildingFilter.Value);
+                newNode.IsCorridor = true;
+                map.AddNode(newNode);
+                corridorNodes.Add(newNode);
+                if (lastCorridorNode != null)
+                {
+                    int distance = CalculateDistance(lastCorridorNode, newNode);
+                    map.AddConnection(lastCorridorNode, newNode, distance);
+                }
+                lastCorridorNode = newNode;
+                mapPictureBox.Invalidate();
+            }
+            else
+            {
+                Node clickedNode = GetClickedNode(e);
+                if (clickedNode != null)
+                {
+                    if (selectedNode == null)
+                    {
+                        selectedNode = clickedNode;
+                        selectedNode.IsSelected = true;
+                        UpdateControls();
+                    }
+                    else if (selectedNode != clickedNode)
+                    {
+                        if (connectionStart == null)
+                        {
+                            connectionStart = selectedNode;
+                            selectedNode = clickedNode;
+                            selectedNode.IsSelected = true;
+                        }
+                        else
+                        {
+                            int distance = CalculateDistance(selectedNode, clickedNode);
+                            map.AddConnection(selectedNode, clickedNode, distance);
+                            connectionStart = null;
+                            selectedNode.IsSelected = false;
+                            selectedNode = null;
+                        }
+                    }
+                    else
+                    {
+                        selectedNode.IsSelected = false;
+                        selectedNode = null;
+                    }
+                }
+                else if (connectionStart != null)
+                {
+                    int x = (int)((e.X - offsetX) / zoomLevel);
+                    int y = (int)((e.Y - offsetY) / zoomLevel);
+                    var newNode = new Node($"Node_{map.Nodes.Count + 1}", x, y, (int)floorFilter.Value, (int)buildingFilter.Value);
+                    map.AddNode(newNode);
+                    int distance = CalculateDistance(connectionStart, newNode);
+                    map.AddConnection(connectionStart, newNode, distance);
+                    connectionStart.IsSelected = false;
+                    connectionStart = null;
+                }
+                mapPictureBox.Invalidate();
+            }
+        }
+    }
+
+    private void StartConnection(object sender, EventArgs e)
+    {
+        if (selectedNode != null)
+        {
+            connectionStart = selectedNode;
+            selectedNode.IsSelected = true;
+            MessageBox.Show("Выберите второй узел для связи или кликните для добавления нового.");
+        }
+    }
+
+    private void RemoveNode(object sender, EventArgs e)
+    {
+        if (selectedNode != null)
+        {
+            map.RemoveNode(selectedNode);
+            selectedNode = null;
+            mapPictureBox.Invalidate();
+        }
+    }
+
+    private Node GetClickedNode(MouseEventArgs e)
+    {
+        foreach (var node in map.Nodes)
+        {
+            if (Math.Abs((node.X * zoomLevel) + offsetX - e.X) < 10 * zoomLevel &&
+                Math.Abs((node.Y * zoomLevel) + offsetY - e.Y) < 10 * zoomLevel)
+            {
+                return node;
+            }
+        }
+        return null;
+    }
+
+    private Tuple<Node, Node> GetClickedConnection(MouseEventArgs e)
+    {
+        int tolerance = 5;
+        foreach (var node in map.Nodes)
+        {
+            foreach (var conn in node.Connections)
+            {
+                PointF p1 = new PointF((float)((node.X * zoomLevel) + offsetX), (float)((node.Y * zoomLevel) + offsetY));
+                PointF p2 = new PointF((float)((conn.Key.X * zoomLevel) + offsetX), (float)((conn.Key.Y * zoomLevel) + offsetY));
+                float dist = DistanceToLineSegment(new PointF(e.X, e.Y), p1, p2);
+                if (dist <= tolerance)
+                {
+                    return new Tuple<Node, Node>(node, conn.Key);
+                }
+            }
+        }
+        return null;
+    }
+
+    private float DistanceToLineSegment(PointF p, PointF a, PointF b)
+    {
+        float dx = b.X - a.X;
+        float dy = b.Y - a.Y;
+        if (dx == 0 && dy == 0) return (float)Math.Sqrt(Math.Pow(p.X - a.X, 2) + Math.Pow(p.Y - a.Y, 2));
+
+        float t = ((p.X - a.X) * dx + (p.Y - a.Y) * dy) / (dx * dx + dy * dy);
+        t = Math.Max(0, Math.Min(1, t));
+
+        float projX = a.X + t * dx;
+        float projY = a.Y + t * dy;
+
+        return (float)Math.Sqrt(Math.Pow(p.X - projX, 2) + Math.Pow(p.Y - projY, 2));
+    }
+
+    private void AddMidpointToConnection(Node from, Node to, MouseEventArgs e)
+    {
+        int midX = (from.X + to.X) / 2;
+        int midY = (from.Y + to.Y) / 2;
+
+        Node midNode = new Node($"MidNode{map.Nodes.Count + 1}", midX, midY, from.Floor, from.Building);
+        midNode.IsCorridor = true;
+        map.AddNode(midNode);
+
+        map.RemoveConnection(from, to);
+        int dist1 = CalculateDistance(from, midNode);
+        int dist2 = CalculateDistance(midNode, to);
+        map.AddConnection(from, midNode, dist1);
+        map.AddConnection(midNode, to, dist2);
+
+        mapPictureBox.Invalidate();
+    }
+
     private void MapPictureBox_MouseDown(object sender, MouseEventArgs e)
     {
         if (e.Button == MouseButtons.Left)
         {
-            // Если узел не выбран, начинаем передвижение карты
-            if (selectedNode == null)
+            selectedNode = GetClickedNode(e);
+            if (selectedNode != null)
+            {
+                selectedNode.IsSelected = true;
+                lastMousePosition = e.Location;
+            }
+            else
             {
                 isDraggingMap = true;
                 lastMousePosition = e.Location;
             }
         }
-        // Оставляем правую кнопку как альтернативный способ передвижения карты (опционально)
         else if (e.Button == MouseButtons.Right)
         {
             isDraggingMap = true;
@@ -166,89 +399,62 @@ public class EditorForm : Form
         }
     }
 
-    /// <summary>
-    /// Обрабатывает событие перемещения мыши для перемещения карты или узла.
-    /// </summary>
-    /// <param name="sender">Источник события.</param>
-    /// <param name="e">Аргументы события.</param>
     private void MapPictureBox_MouseMove(object sender, MouseEventArgs e)
     {
-        if (e.Button == MouseButtons.Left)
+        if (e.Button == MouseButtons.Left || e.Button == MouseButtons.Right)
         {
-            if (selectedNode != null && !nameInputBox.Visible)
+            if (selectedNode != null && e.Button == MouseButtons.Left)
             {
-                // Перемещение узла, если узел выбран
-                selectedNode.X = Math.Max(0, Math.Min(mapPictureBox.Width - 10, (int)(e.X / zoomLevel)));
-                selectedNode.Y = Math.Max(0, Math.Min(mapPictureBox.Height - 10, (int)(e.Y / zoomLevel)));
+                int deltaX = (int)((e.X - lastMousePosition.X) / zoomLevel);
+                int deltaY = (int)((e.Y - lastMousePosition.Y) / zoomLevel);
+                selectedNode.X += deltaX;
+                selectedNode.Y += deltaY;
+                lastMousePosition = e.Location;
                 mapPictureBox.Invalidate();
             }
             else if (isDraggingMap)
             {
-                // Перемещение карты, если узел не выбран
-                int deltaX = (int)((e.X - lastMousePosition.X) / zoomLevel);
-                int deltaY = (int)((e.Y - lastMousePosition.Y) / zoomLevel);
-
-                foreach (var node in map.Nodes)
-                {
-                    node.X += deltaX;
-                    node.Y += deltaY;
-                }
-
+                int deltaX = e.X - lastMousePosition.X;
+                int deltaY = e.Y - lastMousePosition.Y;
+                offsetX += deltaX;
+                offsetY += deltaY;
                 lastMousePosition = e.Location;
                 mapPictureBox.Invalidate();
             }
         }
-        else if (e.Button == MouseButtons.Right && isDraggingMap)
-        {
-            // Перемещение карты с помощью правой кнопки (опционально)
-            int deltaX = (int)((e.X - lastMousePosition.X) / zoomLevel);
-            int deltaY = (int)((e.Y - lastMousePosition.Y) / zoomLevel);
-
-            foreach (var node in map.Nodes)
-            {
-                node.X += deltaX;
-                node.Y += deltaY;
-            }
-
-            lastMousePosition = e.Location;
-            mapPictureBox.Invalidate();
-        }
     }
 
-    /// <summary>
-    /// Обрабатывает событие отпускания кнопки мыши для завершения перемещения карты.
-    /// </summary>
-    /// <param name="sender">Источник события.</param>
-    /// <param name="e">Аргументы события.</param>
     private void MapPictureBox_MouseUp(object sender, MouseEventArgs e)
     {
         if (e.Button == MouseButtons.Left || e.Button == MouseButtons.Right)
         {
             isDraggingMap = false;
+            if (selectedNode != null)
+            {
+                selectedNode.IsSelected = false;
+                selectedNode = null;
+            }
         }
     }
 
-    /// <summary>
-    /// Обрабатывает событие прокрутки колесика мыши для изменения масштаба карты.
-    /// </summary>
-    /// <param name="sender">Источник события.</param>
-    /// <param name="e">Аргументы события.</param>
     private void MapPictureBox_MouseWheel(object sender, MouseEventArgs e)
     {
+        double oldZoom = zoomLevel;
         if (e.Delta > 0)
             zoomLevel *= 1.1;
         else
             zoomLevel /= 1.1;
 
         zoomLevel = Math.Max(0.5, Math.Min(zoomLevel, 3.0));
+
+        int mouseX = e.X;
+        int mouseY = e.Y;
+        offsetX = (int)(mouseX - (mouseX - offsetX) * (zoomLevel / oldZoom));
+        offsetY = (int)(mouseY - (mouseY - offsetY) * (zoomLevel / oldZoom));
+
         mapPictureBox.Invalidate();
     }
 
-    /// <summary>
-    /// Отрисовывает карту с узлами и связями.
-    /// </summary>
-    /// <param name="sender">Источник события.</param>
-    /// <param name="e">Аргументы события.</param>
     private void DrawMap(object sender, PaintEventArgs e)
     {
         if (mapBitmap.Width != mapPictureBox.Width || mapBitmap.Height != mapPictureBox.Height)
@@ -262,19 +468,30 @@ public class EditorForm : Form
             int currentFloor = (int)floorFilter.Value;
             int currentBuilding = (int)buildingFilter.Value;
 
-            var visibleNodes = map.Nodes.Where(n => n.Floor == currentFloor && n.Building == currentBuilding);
+            Bitmap bgImage = map.GetBackgroundImage(currentBuilding, currentFloor);
+            if (bgImage != null)
+            {
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                int scaledWidth = (int)(bgImage.Width * zoomLevel);
+                int scaledHeight = (int)(bgImage.Height * zoomLevel);
+                g.DrawImage(bgImage, new Rectangle(offsetX, offsetY, scaledWidth, scaledHeight));
+            }
+
+            var visibleNodes = map.Nodes.Where(n => n.Floor == currentFloor && n.Building == currentBuilding).ToList();
 
             foreach (var node in visibleNodes)
             {
                 foreach (var conn in node.Connections)
                 {
-                    if (conn.Key.Floor == currentFloor && conn.Key.Building == currentBuilding)
+                    if (visibleNodes.Contains(conn.Key))
                     {
                         using (var pen = new Pen(Color.Black, 2))
                         {
                             g.DrawLine(pen,
-                                (float)(node.X * zoomLevel), (float)(node.Y * zoomLevel),
-                                (float)(conn.Key.X * zoomLevel), (float)(conn.Key.Y * zoomLevel));
+                                (float)((node.X * zoomLevel) + offsetX),
+                                (float)((node.Y * zoomLevel) + offsetY),
+                                (float)((conn.Key.X * zoomLevel) + offsetX),
+                                (float)((conn.Key.Y * zoomLevel) + offsetY));
                         }
                     }
                 }
@@ -287,138 +504,74 @@ public class EditorForm : Form
                             node.Type == NodeType.BuildingTransition ? Brushes.Purple :
                             Brushes.Blue;
                 float nodeSize = (float)(20 * zoomLevel);
+                float drawX = (float)((node.X * zoomLevel) + offsetX - nodeSize / 2);
+                float drawY = (float)((node.Y * zoomLevel) + offsetY - nodeSize / 2);
                 if (node.Type == NodeType.Staircase)
-                    g.FillRectangle(brush, (float)(node.X * zoomLevel - nodeSize / 2),
-                        (float)(node.Y * zoomLevel - nodeSize / 2), nodeSize, nodeSize);
+                    g.FillRectangle(brush, drawX, drawY, nodeSize, nodeSize);
                 else
-                    g.FillEllipse(brush, (float)(node.X * zoomLevel - nodeSize / 2),
-                        (float)(node.Y * zoomLevel - nodeSize / 2), nodeSize, nodeSize);
+                    g.FillEllipse(brush, drawX, drawY, nodeSize, nodeSize);
                 g.DrawString(node.Name, new Font("Arial", (float)(10 * zoomLevel)), Brushes.Black,
-                    (float)(node.X * zoomLevel + nodeSize / 2), (float)(node.Y * zoomLevel));
+                    (float)((node.X * zoomLevel) + offsetX + nodeSize / 2), (float)((node.Y * zoomLevel) + offsetY));
             }
         }
         mapPictureBox.Image = mapBitmap;
     }
 
-    /// <summary>
-    /// Обрабатывает клик мыши на карте для добавления или выбора узла.
-    /// </summary>
-    /// <param name="sender">Источник события.</param>
-    /// <param name="e">Аргументы события.</param>
-    private void MapClick(object sender, MouseEventArgs e)
+    private void AdjustView()
     {
-        var clickedNode = map.Nodes.FirstOrDefault(n =>
-            Math.Abs(n.X * zoomLevel - e.X) < 10 * zoomLevel &&
-            Math.Abs(n.Y * zoomLevel - e.Y) < 10 * zoomLevel);
+        zoomLevel = 1.0;
 
-        if (e.Button == MouseButtons.Left)
-        {
-            if (clickedNode == null)
-            {
-                if (selectedNode != null && nameInputBox.Visible)
-                {
-                    selectedNode.Name = nameInputBox.Text;
-                    nameInputBox.Visible = false;
-                }
-                else if (selectedNode != null)
-                {
-                    selectedNode.IsSelected = false;
-                    selectedNode = null;
-                    UpdateControls(true);
-                }
-                else
-                {
-                    selectedNode = new Node($"Node{map.Nodes.Count + 1}", (int)(e.X / zoomLevel), (int)(e.Y / zoomLevel),
-                        (int)floorFilter.Value, (int)buildingFilter.Value);
-                    selectedNode.IsSelected = true;
-                    map.AddNode(selectedNode);
+        if (map.Nodes.Count == 0) return;
 
-                    nameInputBox.Location = new Point(e.X + 20, e.Y);
-                    nameInputBox.Text = selectedNode.Name;
-                    nameInputBox.Visible = true;
-                    nameInputBox.Focus();
-                }
-            }
-            else
-            {
-                if (selectedNode != null) selectedNode.IsSelected = false;
-                selectedNode = clickedNode;
-                selectedNode.IsSelected = true;
-                UpdateControls();
-            }
-            mapPictureBox.Invalidate();
-        }
+        int currentFloor = (int)floorFilter.Value;
+        int currentBuilding = (int)buildingFilter.Value;
+        var visibleNodes = map.Nodes.Where(n => n.Floor == currentFloor && n.Building == currentBuilding).ToList();
+
+        if (visibleNodes.Count == 0) return;
+
+        int minX = visibleNodes.Min(n => n.X);
+        int minY = visibleNodes.Min(n => n.Y);
+        int maxX = visibleNodes.Max(n => n.X);
+        int maxY = visibleNodes.Max(n => n.Y);
+
+        double widthRatio = (double)mapPictureBox.Width / (maxX - minX + 100);
+        double heightRatio = (double)mapPictureBox.Height / (maxY - minY + 100);
+        zoomLevel = Math.Min(widthRatio, heightRatio);
+        zoomLevel = Math.Max(0.5, Math.Min(zoomLevel, 1.0));
+
+        int centerX = (minX + maxX) / 2;
+        int centerY = (minY + maxY) / 2;
+        int targetCenterX = mapPictureBox.Width / 2;
+        int targetCenterY = mapPictureBox.Height / 2;
+
+        offsetX = targetCenterX - (int)(centerX * zoomLevel);
+        offsetY = targetCenterY - (int)(centerY * zoomLevel);
+
+        mapPictureBox.Invalidate();
     }
 
-    /// <summary>
-    /// Начинает процесс создания связи между двумя узлами.
-    /// </summary>
-    /// <param name="sender">Источник события.</param>
-    /// <param name="e">Аргументы события.</param>
-    private void StartConnection(object sender, EventArgs e)
+    private int CalculateDistance(Node from, Node to)
+    {
+        double dx = from.X - to.X;
+        double dy = from.Y - to.Y;
+        return (int)Math.Sqrt(dx * dx + dy * dy);
+    }
+
+    private void UpdateControls()
     {
         if (selectedNode != null)
-        {
-            if (connectionStart == null)
-            {
-                connectionStart = selectedNode;
-                MessageBox.Show("Выберите второй узел для создания связи");
-            }
-            else if (connectionStart != selectedNode)
-            {
-                map.AddConnection(connectionStart, selectedNode, CalculateDistance(connectionStart, selectedNode));
-                connectionStart = null;
-                mapPictureBox.Invalidate();
-            }
-        }
-    }
-
-    /// <summary>
-    /// Удаляет выбранный узел с карты.
-    /// </summary>
-    /// <param name="sender">Источник события.</param>
-    /// <param name="e">Аргументы события.</param>
-    private void RemoveNode(object sender, EventArgs e)
-    {
-        if (selectedNode != null)
-        {
-            map.RemoveNode(selectedNode);
-            selectedNode = null;
-            UpdateControls(true);
-            mapPictureBox.Invalidate();
-        }
-    }
-
-    /// <summary>
-    /// Обновляет элементы управления на основе выбранного узла.
-    /// </summary>
-    /// <param name="clear">Указывает, нужно ли очистить элементы управления.</param>
-    private void UpdateControls(bool clear = false)
-    {
-        if (clear || selectedNode == null)
-        {
-            nameBox.Text = "";
-            floorFilter.Value = 1;
-            buildingFilter.Value = 1;
-            typeBox.SelectedIndex = 0;
-        }
-        else
         {
             nameBox.Text = selectedNode.Name;
             floorFilter.Value = selectedNode.Floor;
             buildingFilter.Value = selectedNode.Building;
             typeBox.SelectedItem = selectedNode.Type;
         }
-    }
-
-    /// <summary>
-    /// Вычисляет расстояние между двумя узлами.
-    /// </summary>
-    /// <param name="n1">Первый узел.</param>
-    /// <param name="n2">Второй узел.</param>
-    /// <returns>Расстояние между узлами.</returns>
-    private int CalculateDistance(Node n1, Node n2)
-    {
-        return (int)Math.Sqrt(Math.Pow(n2.X - n1.X, 2) + Math.Pow(n2.Y - n1.Y, 2));
+        else
+        {
+            nameBox.Text = "";
+            floorFilter.Value = 1;
+            buildingFilter.Value = 1;
+            typeBox.SelectedIndex = -1;
+        }
     }
 }
